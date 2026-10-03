@@ -16,7 +16,14 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    # Lint only before a release build, instead of on every push.
+    uses: ./.github/workflows/lint.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+
   build:
+    needs: [lint]
     strategy:
       fail-fast: false
       matrix:
