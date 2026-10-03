@@ -1,0 +1,138 @@
+name: Publish Fork Release
+run-name: Publish fork release ${{ inputs.tag || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v2.1.1)"
+        type: string
+        required: true
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            goamd64: v1
+          - goarch: arm64
+            goamd64: ""
+    runs-on: ubuntu-22.04
+    env:
+      GOOS: linux
+      GOARCH: ${{ matrix.goarch }}
+      GOAMD64: ${{ matrix.goamd64 }}
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve version and asset name
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag || github.ref_name }}"
+          key="linux-${GOARCH}${GOAMD64}"
+          NAME=$(jq -er --arg k "$key" '.[$k].friendlyName' < install/friendly-filenames.json)
+          echo "VERSION=$TAG" >> "$GITHUB_ENV"
+          echo "ASSET_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "tag=$TAG key=$key asset=$NAME"
+
+      - name: Set up Go 1.26
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: false
+
+      - name: Install clang/llvm
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y clang-15 llvm-15
+
+      - name: Fetch submodules and modules
+        run: |
+          git submodule update --init --recursive
+          go mod download -modcacherw
+
+      - name: Build dae
+        run: |
+          set -euo pipefail
+          mkdir -p bundled
+          export OUTPUT=pkgdir/usr/bin/dae
+          export VERSION="$VERSION"
+          export CLANG=clang-15
+          export STRIP=llvm-strip-15
+          make
+          install -Dm644 ./install/dae.service -t ./pkgdir/usr/lib/systemd/system/
+          install -Dm640 ./example.dae -t ./pkgdir/etc/dae/
+          install -d ./pkgdir/usr/share/dae/
+          ./scripts/fetch-geo-data.sh ./pkgdir/usr/share/dae
+          ./pkgdir/usr/bin/dae --version || true
+
+      - name: Build packages (deb, rpm, pkg.tar.zst)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y libarchive-tools
+          sudo gem install fpm
+          case "$GOARCH" in
+            amd64) deb_arch=amd64; other_arch=x86_64 ;;
+            arm64) deb_arch=arm64; other_arch=aarch64 ;;
+            *) echo "unsupported GOARCH $GOARCH" >&2; exit 1 ;;
+          esac
+          pkgver="${VERSION#v}"
+          for pkg_mgr in deb rpm pacman; do
+            case "$pkg_mgr" in
+              deb) pkg_arch="$deb_arch" ;;
+              *)   pkg_arch="$other_arch" ;;
+            esac
+            fpm -s dir -t "$pkg_mgr" -a "$pkg_arch" -v "$pkgver" -n dae \
+                --url "https://github.com/HittyGubby/dae" \
+                --description "eBPF-based Linux high-performance transparent proxy solution (fork)" \
+                --maintainer "HittyGubby" \
+                --license "AGPL-3.0" \
+                --package "./bundled/dae-${ASSET_NAME}.${pkg_mgr}" \
+                --after-install ./install/package_after_install.sh \
+                --after-remove ./install/package_after_remove.sh \
+                --deb-compression xz --deb-compression-level 9 \
+                --rpm-compression xz --verbose \
+                -C pkgdir .
+          done
+          mv "./bundled/dae-${ASSET_NAME}.pacman" "./bundled/dae-${ASSET_NAME}.pkg.tar.zst"
+          ls -lh ./bundled
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dae-${{ env.ASSET_NAME }}
+          path: ./bundled/*
+          if-no-files-found: error
+
+  release:
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: release/*

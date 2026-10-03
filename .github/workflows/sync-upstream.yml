@@ -1,0 +1,70 @@
+name: Sync Upstream Release
+run-name: Sync upstream stable release
+
+on:
+  schedule:
+    # 03:00 UTC+8 (19:00 UTC) daily. Only checks the API; it pulls/builds only
+    # when upstream publishes a new stable release (prereleases are ignored).
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream latest stable release and trigger release build
+        run: |
+          set -euo pipefail
+
+          # releases/latest excludes prereleases, so the rolling "nightly"
+          # prerelease is ignored.
+          TAG=$(gh api repos/daeuniverse/dae/releases/latest --jq .tag_name)
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "No upstream stable release found; nothing to do."
+            exit 0
+          fi
+          echo "Upstream latest stable release: $TAG"
+
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q .; then
+            echo "Tag $TAG already exists on this fork; nothing to do."
+            exit 0
+          fi
+
+          git fetch --no-tags https://github.com/daeuniverse/dae.git "refs/tags/$TAG:refs/tags/$TAG"
+
+          if ! git merge --no-edit "$TAG"; then
+            git merge --abort || true
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "[upstream-sync] conflict merging $TAG" \
+              --body "$(printf 'Automatic merge of upstream stable release `%s` failed due to conflicts.\n\nResolve manually:\n```\ngit fetch https://github.com/daeuniverse/dae.git refs/tags/%s\n# on main:\ngit merge %s\n```\n' "$TAG" "$TAG" "$TAG")"
+            exit 1
+          fi
+
+          git push origin main
+          git tag -f "$TAG" main
+          git push -f origin "refs/tags/$TAG"
+
+          gh workflow run release-fork.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG"
