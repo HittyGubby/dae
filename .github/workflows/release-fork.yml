@@ -55,10 +55,10 @@ jobs:
           echo "ASSET_NAME=$NAME" >> "$GITHUB_ENV"
           echo "tag=$TAG key=$key asset=$NAME"
 
-      - name: Set up Go 1.26
+      - name: Set up Go 1.27
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: "1.27.0"
           cache: false
 
       - name: Install clang/llvm
