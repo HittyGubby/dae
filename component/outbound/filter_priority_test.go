@@ -33,7 +33,7 @@ func TestFilterAndAnnotatePriorityOrdering(t *testing.T) {
 		"ta": {"socks5://u:p@203.0.113.1:1080"},
 		"tb": {"socks5://u:p@203.0.113.2:1080"},
 		"tc": {"socks5://u:p@203.0.113.3:1080"},
-	})
+	}, nil)
 	t.Cleanup(func() { _ = set.Close() })
 
 	// Tags sort alphabetically, so the node order is ta, tb, tc.
